@@ -936,22 +936,10 @@ function telaLogin(msg){
        onkeydown="if(event.key==='Enter')entrar()"></div>
     <button class="btn btn-p" style="width:100%;justify-content:center;margin-top:4px" onclick="entrar()">Entrar</button>
    </div>
-   <div class="demoacc">Esqueceu a senha? Procure o gestor da qualidade para gerar uma nova.
-    <div style="margin-top:6px"><a href="#" onclick="event.preventDefault();restaurarAcesso()"
-      style="color:var(--indigo);font-weight:600">Não consigo entrar como administrador</a></div></div>
+   <div class="demoacc">Esqueceu a senha? Procure o gestor da qualidade para gerar uma nova.</div>
   </div>`;
  document.body.appendChild(host);
  setTimeout(()=>{const e=$('#lgUser'); if(e) e.focus()},80);
-}
-/* saída de emergência: devolve o acesso do administrador nesta máquina */
-function restaurarAcesso(){
- const a=S.pessoas.find(p=>p.papel==='Administrador')
-   ||S.pessoas[0];
- if(!a){ toast('Nenhum administrador cadastrado.','err'); return }
- a.login='admin'; a.senha='admin123'; a.senhaTemp=true; a.ativo=true;
- save();
- const h=$('#loginHost'); if(h) h.remove();
- telaLogin('Acesso restaurado. Entre com o usuário admin e a senha admin123 — você definirá uma nova senha em seguida.');
 }
 function preencher(u,s2){ $('#lgUser').value=u; $('#lgPass').value=s2; $('#lgPass').focus() }
 function entrar(){
