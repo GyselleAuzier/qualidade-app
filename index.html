@@ -357,6 +357,24 @@ const KEY='gestao_auditorias_v1';
 let S=null, VIEW={n:'dashboard',p:{}}, SESSION={perfil:'',login:'',nome:''}, NOTIF_OPEN=false;
 const SKEY='gauditorias_sessao';
 
+/* Camada de armazenamento: usa localStorage quando o navegador permite
+   (Chrome em file://, todos via http) e cai para memória quando ele bloqueia
+   (Firefox/Safari em file://, aba anônima, cookies de site desativados).
+   Sem isto, um localStorage bloqueado derrubava o app logo no início. */
+const MEM={};
+let STORAGE_OK=true;
+(function(){
+ try{
+  const t='__t'+Date.now();
+  window.localStorage.setItem(t,'1'); window.localStorage.removeItem(t);
+ }catch(e){ STORAGE_OK=false; }
+})();
+const store={
+ get(k){ if(STORAGE_OK){ try{ return window.localStorage.getItem(k) }catch(e){ STORAGE_OK=false } } return (k in MEM)?MEM[k]:null; },
+ set(k,v){ MEM[k]=v; if(STORAGE_OK){ try{ window.localStorage.setItem(k,v); return true }catch(e){ STORAGE_OK=false } } return false; },
+ del(k){ delete MEM[k]; if(STORAGE_OK){ try{ window.localStorage.removeItem(k) }catch(e){ STORAGE_OK=false } } }
+};
+
 const RESP={C:'Conforme',NC:'Não conforme',OM:'Oportunidade de melhoria',NA:'Não aplicável'};
 const NC_FLUXO=['Pendente','Em andamento','Em validação','Encerrada'];
 
@@ -466,7 +484,7 @@ function base(){
 }
 
 function load(){
- try{const r=localStorage.getItem(KEY); if(r){S=JSON.parse(r); migrar(); return true}}catch(e){}
+ try{const r=store.get(KEY); if(r){S=JSON.parse(r); migrar(); return true}}catch(e){}
  S=base(); normalizarTemplates(); save(); return false;
 }
 /* item de checklist sempre no formato {t,s,tp,e} */
@@ -536,7 +554,7 @@ function migrar(){
   S.config.rev=5;
  }
 }
-function save(){ try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Não foi possível salvar: armazenamento cheio. Exporte o backup e limpe evidências antigas.','err')} }
+function save(){ try{ const ok=store.set(KEY,JSON.stringify(S)); if(!ok&&STORAGE_OK===false) avisarSemStorage(); }catch(e){ toast('Não foi possível salvar: armazenamento cheio. Exporte o backup e limpe evidências antigas.','err') } }
 
 /* =========================================================
    UTILITÁRIOS
@@ -815,8 +833,8 @@ const MENU=[
  {k:'config',ic:'⚙',t:'Configurações',perfis:['Administrador']}
 ];
 let NAVOPEN={}, SBCOL=false;
-try{ NAVOPEN=JSON.parse(localStorage.getItem('gauditorias_nav')||'{}'); SBCOL=localStorage.getItem('gauditorias_sb')==='1' }catch(e){}
-function salvarNav(){ try{localStorage.setItem('gauditorias_nav',JSON.stringify(NAVOPEN));localStorage.setItem('gauditorias_sb',SBCOL?'1':'0')}catch(e){} }
+try{ NAVOPEN=JSON.parse(store.get('gauditorias_nav')||'{}'); SBCOL=store.get('gauditorias_sb')==='1' }catch(e){}
+function salvarNav(){ try{ store.set('gauditorias_nav',JSON.stringify(NAVOPEN)); store.set('gauditorias_sb',SBCOL?'1':'0') }catch(e){} }
 function toggleGrupo(g){ NAVOPEN[g]=NAVOPEN[g]===false?true:false; salvarNav(); renderNav() }
 function toggleSidebar(){
  SBCOL=!SBCOL; document.body.classList.toggle('sb-collapsed',SBCOL);
@@ -893,11 +911,11 @@ function verComo(v){
 }
 function renderBarraConsulta(){
  const v=SESSION.visao;
- $('#barraConsulta').innerHTML = v?`<div class="consulta noprint">
+ $('#barraConsulta').innerHTML = faixaSemStorage() + (v?`<div class="consulta noprint">
    👁 Você está vendo como o sistema aparece para um <b>${esc(NOME_PAPEL[v]||v)}</b>. Visualização apenas — nada é gravado.
    <div class="spacer"></div>
    <button class="btn btn-s btn-sm" onclick="verComo('')">Voltar à minha tela</button>
-  </div>`:'';
+  </div>`:'');
 }
 function renderPerfilSelect(){
  const p=usuarioReal();
@@ -908,10 +926,10 @@ function renderPerfilSelect(){
 }
 function usuario(){ return S.pessoas.find(x=>x.login===SESSION.login)||{} }
 function usuarioReal(){ return S.pessoas.find(x=>x.login===SESSION.login) }
-function salvarSessao(){ try{localStorage.setItem(SKEY,JSON.stringify(SESSION))}catch(e){} }
+function salvarSessao(){ try{ store.set(SKEY,JSON.stringify(SESSION)) }catch(e){} }
 function restaurarSessao(){
  try{
-  const r=JSON.parse(localStorage.getItem(SKEY)||'null');
+  const r=JSON.parse(store.get(SKEY)||'null');
   if(r&&r.login&&S.pessoas.some(p=>p.login===r.login&&p.ativo!==false)){ SESSION=r; return true }
  }catch(e){}
  return false;
@@ -937,6 +955,7 @@ function telaLogin(msg){
        onkeydown="if(event.key==='Enter')entrar()"></div>
     <button class="btn btn-p" style="width:100%;justify-content:center;margin-top:4px" onclick="entrar()">Entrar</button>
    </div>
+   ${STORAGE_OK?'':`<div class="loginerr" style="margin:0 28px 0">⚠ Este navegador está bloqueando o armazenamento. Você até consegue entrar, mas nada será salvo ao fechar a aba. Abra o app pelo endereço do site (não pelo arquivo) e fora da aba anônima.</div>`}
    <div class="demoacc">Esqueceu a senha? Procure o gestor da qualidade para gerar uma nova.</div>
   </div>`;
  document.body.appendChild(host);
@@ -964,7 +983,7 @@ function telaInicial(){
 function sair(){
  confirmar('Sair do sistema?','Você precisará informar usuário e senha novamente.',()=>{
   SESSION={perfil:'',login:'',nome:'',visao:null};
-  try{localStorage.removeItem(SKEY)}catch(e){}
+  try{ store.del(SKEY) }catch(e){}
   fecharModal(); NOTIF_OPEN=false; renderNotif();
   telaLogin();
  },'Sair','btn-no');
@@ -2839,7 +2858,7 @@ function exportarCSV(){
 }
 function zerar(){
  confirmar('Apagar todos os dados?','As auditorias, as não conformidades e as configurações serão removidas deste navegador. Exporte o backup antes, se quiser guardar o histórico.',()=>{
-  localStorage.removeItem(KEY); S=base(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
+  store.del(KEY); S=base(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
  },'Apagar tudo','btn-no');
 }
 
@@ -3190,6 +3209,18 @@ function confirmar(titulo,texto,cb,rotulo,classe){
    <button class="btn ${classe||'btn-p'}" onclick="(window._cb||function(){})();fecharModal()">${rotulo||'Confirmar'}</button>`);
 }
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ fecharModal(); if(NOTIF_OPEN){NOTIF_OPEN=false;renderNotif()} } });
+
+function avisarSemStorage(){
+ if(window.__avisouStorage) return;
+ window.__avisouStorage=true;
+ toast('Este navegador está bloqueando o armazenamento — os dados valem só enquanto a aba estiver aberta.','err');
+}
+function faixaSemStorage(){
+ if(STORAGE_OK) return '';
+ return `<div class="consulta noprint" style="background:#FEE2E2;border-color:#FCD9D9;color:#B42318">
+   ⚠ Este navegador não está salvando os dados. Tudo que você fizer vale apenas enquanto esta aba ficar aberta e será perdido ao fechá-la.
+   Para uso normal, abra o app pelo endereço do site (não pelo arquivo) e fora da aba anônima.</div>`;
+}
 
 /* =========================================================
    INÍCIO
