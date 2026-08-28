@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestão da Qualidade - ARX Platform</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Supabase JS Client -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#0B0B0B',
+                        cardBg: '#161616',
+                        accentBlue: '#2980B9',
+                        laserCyan: '#00D2FF',
+                    },
+                    fontFamily: { sans: ['Inter', 'sans-serif'] }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #0B0B0B; color: #BDC3C7; }
+        .tab-active { background: rgba(0, 210, 255, 0.1); border-left: 3px solid #00D2FF; color: #FFFFFF; }
+    </style>
+</head>
+<body class="h-screen overflow-hidden flex">
+
+    <!-- MENU LATERAL -->
+    <aside class="w-64 bg-cardBg border-r border-zinc-800 flex flex-col justify-between z-10">
+        <div>
+            <div class="p-6 border-b border-zinc-800 flex items-center gap-3">
+                <div class="h-8 w-8 bg-accentBlue rounded flex items-center justify-center font-bold text-white shadow-lg">Q</div>
+                <div>
+                    <h1 class="text-white font-bold text-sm tracking-wider uppercase">Gestão da Qualidade</h1>
+                    <span class="text-xs text-zinc-500">Módulo White-Label</span>
+                </div>
+            </div>
+            <nav class="mt-4 px-3 space-y-1">
+                <button onclick="switchTab('painel')" id="btn-painel" class="tab-active w-full flex items-center gap-3 px-4 py-2.5 text-xs font-medium rounded transition-all text-left">
+                    <i class="fa-solid fa-chart-pie w-4 text-laserCyan"></i> Painel Geral
+                </button>
+                <button onclick="switchTab('auditorias')" id="btn-auditorias" class="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-medium rounded transition-all hover:bg-zinc-800 text-left">
+                    <i class="fa-solid fa-clipboard-check w-4 text-laserCyan"></i> Auditorias
+                </button>
+                <button onclick="switchTab('nc')" id="btn-nc" class="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-medium rounded transition-all hover:bg-zinc-800 text-left">
+                    <i class="fa-solid fa-triangle-exclamation w-4 text-laserCyan"></i> Não Conformidades
+                </button>
+                <button onclick="switchTab('apoio')" id="btn-apoio" class="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-medium rounded transition-all hover:bg-zinc-800 text-left">
+                    <i class="fa-solid fa-database w-4 text-laserCyan"></i> Cadastros & Apoio
+                </button>
+            </nav>
+        </div>
+        <div class="p-4 border-t border-zinc-800 text-xs text-zinc-500 flex items-center justify-between">
+            <span class="flex items-center gap-2"><span class="h-2 w-2 bg-emerald-500 rounded-full animate-pulse"></span> Supabase Ativo</span>
+            <span>v1.0</span>
+        </div>
+    </aside>
+
+    <!-- CONTEÚDO CENTRAL -->
+    <main class="flex-1 flex flex-col overflow-hidden bg-darkBg">
+        <header class="h-16 border-b border-zinc-800 flex items-center justify-between px-8 bg-cardBg/50">
+            <h2 id="current-title" class="text-white font-bold text-sm uppercase tracking-wider">Painel Geral</h2>
+            <div class="flex items-center gap-4 text-xs">
+                <span id="system-clock" class="text-laserCyan font-mono">--:--:--</span>
+            </div>
+        </header>
+
+        <div class="flex-1 overflow-y-auto p-8">
+            <!-- TAB 1: PAINEL -->
+            <section id="view-painel" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    <div class="bg-cardBg p-5 rounded border border-zinc-800">
+                        <div class="text-xs uppercase text-zinc-500 font-semibold">Auditorias Realizadas</div>
+                        <div id="kpi-auditorias" class="text-3xl font-bold text-white mt-2">0</div>
+                    </div>
+                    <div class="bg-cardBg p-5 rounded border border-zinc-800">
+                        <div class="text-xs uppercase text-zinc-500 font-semibold">NCs Abertas</div>
+                        <div id="kpi-nc-abertas" class="text-3xl font-bold text-amber-400 mt-2">0</div>
+                    </div>
+                    <div class="bg-cardBg p-5 rounded border border-zinc-800">
+                        <div class="text-xs uppercase text-zinc-500 font-semibold">NCs Encerradas</div>
+                        <div id="kpi-nc-fechadas" class="text-3xl font-bold text-emerald-400 mt-2">0</div>
+                    </div>
+                    <div class="bg-cardBg p-5 rounded border border-zinc-800">
+                        <div class="text-xs uppercase text-zinc-500 font-semibold">Índice Médio da Qualidade</div>
+                        <div id="kpi-indice" class="text-3xl font-bold text-laserCyan mt-2">0%</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: AUDITORIAS -->
+            <section id="view-auditorias" class="hidden space-y-6">
+                <div class="bg-cardBg p-6 rounded border border-zinc-800 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-white font-bold text-sm uppercase">Lista de Auditorias</h3>
+                        <p class="text-xs text-zinc-500 mt-1">Gerencie e execute as auditorias cadastradas.</p>
+                    </div>
+                    <button onclick="carregarAuditorias()" class="bg-accentBlue text-white text-xs font-bold px-4 py-2 rounded hover:bg-blue-600 transition">Atualizar Dados</button>
+                </div>
+                <div class="bg-cardBg rounded border border-zinc-800 overflow-hidden">
+                    <table class="w-full text-left text-xs text-zinc-400">
+                        <thead class="bg-darkBg text-zinc-500 uppercase border-b border-zinc-800">
+                            <tr>
+                                <th class="py-3 px-4">Código</th>
+                                <th class="py-3 px-4">Processo</th>
+                                <th class="py-3 px-4">Data</th>
+                                <th class="py-3 px-4">Status</th>
+                                <th class="py-3 px-4 text-right">Resultado</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tabela-auditorias-corpo" class="divide-y divide-zinc-800/50"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 3: NÃO CONFORMIDADES -->
+            <section id="view-nc" class="hidden space-y-6">
+                <div class="bg-cardBg p-6 rounded border border-zinc-800">
+                    <h3 class="text-white font-bold text-sm uppercase">Tratamento de Não Conformidades (NC)</h3>
+                    <p class="text-xs text-zinc-500 mt-1">Acompanhe a esteira de correção e validação técnica.</p>
+                </div>
+                <div class="bg-cardBg rounded border border-zinc-800 overflow-hidden">
+                    <table class="w-full text-left text-xs text-zinc-400">
+                        <thead class="bg-darkBg text-zinc-500 uppercase border-b border-zinc-800">
+                            <tr>
+                                <th class="py-3 px-4">Código</th>
+                                <th class="py-3 px-4">Descrição</th>
+                                <th class="py-3 px-4">Classificação</th>
+                                <th class="py-3 px-4">Status</th>
+                                <th class="py-3 px-4 text-right">Prazo</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tabela-nc-corpo" class="divide-y divide-zinc-800/50"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 4: CADASTROS & APOIO -->
+            <section id="view-apoio" class="hidden space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="bg-cardBg p-6 rounded border border-zinc-800 space-y-4">
+                        <h3 class="text-white font-bold text-sm uppercase text-laserCyan">Cadastrar Unidade</h3>
+                        <form id="form-unidade" onsubmit="salvarUnidade(event)" class="space-y-3">
+                            <div>
+                                <label class="block text-xs text-zinc-400 uppercase mb-1">Nome da Unidade / Empresa</label>
+                                <input type="text" id="uni-nome" required class="w-full bg-darkBg border border-zinc-800 rounded px-3 py-2 text-xs text-white">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-zinc-400 uppercase mb-1">Responsável</label>
+                                <input type="text" id="uni-resp" class="w-full bg-darkBg border border-zinc-800 rounded px-3 py-2 text-xs text-white">
+                            </div>
+                            <button type="submit" class="w-full bg-laserCyan text-darkBg font-bold py-2 rounded text-xs uppercase hover:opacity-90">Salvar Unidade</button>
+                        </form>
+                    </div>
+
+                    <div class="bg-cardBg p-6 rounded border border-zinc-800 space-y-4">
+                        <h3 class="text-white font-bold text-sm uppercase text-laserCyan">Cadastrar Setor</h3>
+                        <form id="form-setor" onsubmit="salvarSetor(event)" class="space-y-3">
+                            <div>
+                                <label class="block text-xs text-zinc-400 uppercase mb-1">Nome do Setor</label>
+                                <input type="text" id="set-nome" required class="w-full bg-darkBg border border-zinc-800 rounded px-3 py-2 text-xs text-white">
+                            </div>
+                            <button type="submit" class="w-full bg-laserCyan text-darkBg font-bold py-2 rounded text-xs uppercase hover:opacity-90">Salvar Setor</button>
+                        </form>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script>
+        // CONFIGURAÇÃO DO SUPABASE (Insira suas chaves reais abaixo)
+        const SUPABASE_URL = 'https://byypptxwwqqmdeicbrns.supabase.co';
+        const SUPABASE_KEY = 'SUA_CHAVE_ANON_AQUI'; // Cole a sua chave anon public do Supabase aqui
+        const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        function switchTab(tabId) {
+            ['painel', 'auditorias', 'nc', 'apoio'].forEach(id => {
+                document.getElementById(`view-${id}`).classList.add('hidden');
+                document.getElementById(`btn-${id}`).classList.remove('tab-active');
+            });
+            document.getElementById(`view-${tabId}`).classList.remove('hidden');
+            document.getElementById(`btn-${tabId}`).classList.add('tab-active');
+            
+            const titles = { painel: 'Painel Geral', auditorias: 'Auditorias', nc: 'Não Conformidades', apoio: 'Cadastros & Apoio' };
+            document.getElementById('current-title').innerText = titles[tabId];
+            
+            if(tabId === 'auditorias') carregarAuditorias();
+            if(tabId === 'nc') carregarNCs();
+            if(tabId === 'painel') carregarKPIs();
+        }
+
+        async function carregarKPIs() {
+            const { count: cAud } = await _supabase.from('auditorias').select('*', { count: 'exact', head: true });
+            const { count: cOpen } = await _supabase.from('nao_conformidades').select('*', { count: 'exact', head: true }).neq('status', 'encerrada');
+            const { count: cClose } = await _supabase.from('nao_conformidades').select('*', { count: 'exact', head: true }).eq('status', 'encerrada');
+            
+            document.getElementById('kpi-auditorias').innerText = cAud || 0;
+            document.getElementById('kpi-nc-abertas').innerText = cOpen || 0;
+            document.getElementById('kpi-nc-fechadas').innerText = cClose || 0;
+        }
+
+        async function carregarAuditorias() {
+            const { data, error } = await _supabase.from('auditorias').select('*').order('created_at', { ascending: false });
+            if(error) return console.error(error);
+            
+            const tbody = document.getElementById('tabela-auditorias-corpo');
+            tbody.innerHTML = '';
+            if(!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="py-4 px-4 text-center text-zinc-600">Nenhuma auditoria registrada.</td></tr>`;
+                return;
+            }
+            data.forEach(a => {
+                tbody.innerHTML += `
+                    <tr class="hover:bg-zinc-800/40">
+                        <td class="py-3 px-4 text-white font-mono">${a.codigo || 'AUD-00X'}</td>
+                        <td class="py-3 px-4">${a.processo || 'Geral'}</td>
+                        <td class="py-3 px-4">${a.data}</td>
+                        <td class="py-3 px-4"><span class="bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded text-laserCyan">${a.status}</span></td>
+                        <td class="py-3 px-4 text-right font-bold text-white">${a.resultado_pct ? a.resultado_pct + '%' : 'Pendente'}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function carregarNCs() {
+            const { data, error } = await _supabase.from('nao_conformidades').select('*').order('aberta_em', { ascending: false });
+            if(error) return console.error(error);
+            
+            const tbody = document.getElementById('tabela-nc-corpo');
+            tbody.innerHTML = '';
+            if(!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="py-4 px-4 text-center text-zinc-600">Nenhuma não conformidade registrada.</td></tr>`;
+                return;
+            }
+            data.forEach(n => {
+                tbody.innerHTML += `
+                    <tr class="hover:bg-zinc-800/40">
+                        <td class="py-3 px-4 text-white font-mono">${n.codigo || 'NC-00X'}</td>
+                        <td class="py-3 px-4 text-white">${n.descricao}</td>
+                        <td class="py-3 px-4 uppercase text-xs">${n.classificacao}</td>
+                        <td class="py-3 px-4"><span class="bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded text-amber-400">${n.status}</span></td>
+                        <td class="py-3 px-4 text-right">${n.prazo || 'Sem prazo'}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function salvarUnidade(e) {
+            e.preventDefault();
+            const nome = document.getElementById('uni-nome').value;
+            const responsavel = document.getElementById('uni-resp').value;
+            const { error } = await _supabase.from('unidades').insert([{ nome, responsavel }]);
+            if(!error) {
+                alert('Unidade cadastrada com sucesso!');
+                document.getElementById('form-unidade').reset();
+            } else {
+                alert('Erro: ' + error.message);
+            }
+        }
+
+        async function salvarSetor(e) {
+            e.preventDefault();
+            const nome = document.getElementById('set-nome').value;
+            const { error } = await _supabase.from('setores').insert([{ nome }]);
+            if(!error) {
+                alert('Setor cadastrado com sucesso!');
+                document.getElementById('form-setor').reset();
+            } else {
+                alert('Erro: ' + error.message);
+            }
+        }
+
+        setInterval(() => {
+            document.getElementById('system-clock').innerText = new Date().toLocaleTimeString('pt-BR');
+        }, 1000);
+
+        carregarKPIs();
+    </script>
+</body>
+</html>
