@@ -442,7 +442,7 @@ function base(){
    appNome:'Gestão da Qualidade',
    empresa:'',
    som:true,
-   rev:4,
+   rev:5,
    unidades:['Unidade 01','Unidade 02'],
    setores:['Produção','Obra','Logística','Comercial','Fiscal','Compras','Estoque','Almoxarifado','Administrativo','Financeiro','RH','Manutenção','Qualidade'],
    tipos:['5S','Auditoria de Processo','Auditoria Interna ISO 9001','Auditoria de procedimento/IT','Outro'],
@@ -457,15 +457,7 @@ function base(){
    planejadasMes:32
   },
   pessoas:[
-   pes('Gestor da Qualidade','Administrador',['Qualidade'],'admin','admin123',false),
-   pes('João Batista','Auditor',[],'joao.batista','123456',true),
-   pes('Patrícia Nunes','Auditor',[],'patricia.nunes','123456',true),
-   pes('Ana Paula Rocha','Gestor',['Produção'],'ana.rocha','123456',true),
-   pes('Carlos Menezes','Gestor',['Logística','Almoxarifado'],'carlos.menezes','123456',true),
-   pes('Rafael Lima','Gestor',['Compras','Fiscal'],'rafael.lima','123456',true),
-   pes('Juliana Torres','Gestor',['Estoque'],'juliana.torres','123456',true),
-   pes('Marcos Vieira','Gestor',['Administrativo','Financeiro','RH'],'marcos.vieira','123456',true),
-   pes('Diego Farias','Gestor',['Obra','Manutenção'],'diego.farias','123456',true)
+   pes('Gestor da Qualidade','Administrador',['Qualidade'],'admin','admin123',false)
   ],
   unidadesInfo:{},
   templates:JSON.parse(JSON.stringify(TEMPLATES)),
@@ -475,7 +467,7 @@ function base(){
 
 function load(){
  try{const r=localStorage.getItem(KEY); if(r){S=JSON.parse(r); migrar(); return true}}catch(e){}
- S=base(); normalizarTemplates(); seed(); save(); return false;
+ S=base(); normalizarTemplates(); save(); return false;
 }
 /* item de checklist sempre no formato {t,s,tp,e} */
 function normItem(x){
@@ -509,11 +501,12 @@ function migrar(){
  });
  if(!S.pessoas.some(p=>p.papel==='Administrador'))
   S.pessoas.unshift(pes('Gestor da Qualidade','Administrador',[(S.config.setores||['Qualidade'])[0]],'admin','admin123',false));
- // o login 'admin' precisa existir sempre: bases criadas antes dos logins ficavam sem ele
- if(!S.pessoas.some(p=>p.login==='admin')){
-  const a=S.pessoas.find(p=>p.papel==='Administrador');
-  if(a){ a.login='admin'; a.senha='admin123'; a.senhaTemp=false; a.ativo=true }
- }
+ // garante que todo administrador tenha um login válido, sem sobrescrever quem já tem senha própria
+ S.pessoas.filter(p=>p.papel==='Administrador').forEach(a=>{
+  if(!a.login){ a.login=loginSugerido(a.nome)||'admin'; }
+  if(!a.senha){ a.senha='admin123'; a.senhaTemp=true; }
+  if(a.ativo===undefined) a.ativo=true;
+ });
  (S.auditorias||[]).forEach(a=>a.itens.forEach(it=>{ if(!it.tipo) it.tipo='C' }));
  // rev 2: 5S passou a usar Conforme / Não conforme e a grafia correta do senso Seiso
  if((c.rev||1)<2){
@@ -533,6 +526,14 @@ function migrar(){
   S.pessoas.forEach(x=>{ if(!x.unidades) x.unidades=[] });
   (S.notificacoes||[]).forEach(x=>{ if(x.para==='Qualidade') x.para='Administrador' });
   c.rev=4;
+ }
+ // rev 5: remover a base de demonstração e começar vazio, preservando o acesso admin
+ if((c.rev||1)<5){
+  const adm=S.pessoas.find(p=>p.login==='admin')
+    ||S.pessoas.find(p=>p.papel==='Administrador');
+  S=base();
+  if(adm){ S.pessoas=[adm]; }
+  S.config.rev=5;
  }
 }
 function save(){ try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Não foi possível salvar: armazenamento cheio. Exporte o backup e limpe evidências antigas.','err')} }
@@ -2838,7 +2839,7 @@ function exportarCSV(){
 }
 function zerar(){
  confirmar('Apagar todos os dados?','As auditorias, as não conformidades e as configurações serão removidas deste navegador. Exporte o backup antes, se quiser guardar o histórico.',()=>{
-  localStorage.removeItem(KEY); S=base(); seed(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
+  localStorage.removeItem(KEY); S=base(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
  },'Apagar tudo','btn-no');
 }
 
