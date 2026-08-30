@@ -399,6 +399,8 @@ function nuvemAgendarSave(){
 }
 async function nuvemEnviar(){
  if(!SB_OK||CLOUD.salvando){ return; }
+ // segurança: nunca grava uma base sem nenhum usuário (sempre há ao menos o admin)
+ if(!S || !Array.isArray(S.pessoas) || S.pessoas.length===0){ CLOUD.pendente=false; return; }
  CLOUD.salvando=true; CLOUD.pendente=false; marcarSync('salvando');
  try{
   const { error } = await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
@@ -412,16 +414,35 @@ async function nuvemEnviar(){
   if(CLOUD.pendente) nuvemAgendarSave();
  }
 }
-/* lê o estado compartilhado; se ainda não existir, cria com a base inicial */
+/* lê o estado compartilhado.
+   REGRA DE OURO: se já existe base salva na nuvem, SEMPRE usa e NUNCA
+   sobrescreve. A base inicial só é criada quando de fato não existe
+   nenhuma linha — e é criada com INSERT (não upsert), então, se por
+   acaso já existir, o INSERT falha e a gente recarrega o que está lá.
+   Isso torna impossível apagar dados existentes por uma leitura falha. */
 async function nuvemCarregar(){
  const { data, error } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
  if(error) throw error;
- if(data&&data.value&&data.value.pessoas){
+ if(data && data.value){
   S=data.value; migrar(); normalizarTemplates();
- }else{
-  S=base(); normalizarTemplates();
-  await hashSenhasIniciais();
-  await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
+  if(!Array.isArray(S.pessoas) || S.pessoas.length===0){
+   // proteção: garante um administrador sem apagar o resto dos dados
+   const b=base(); S.pessoas=(b.pessoas||[]); if(!S.templates) S.templates=b.templates;
+   normalizarTemplates(); await hashSenhasIniciais();
+   await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
+  }
+  return;
+ }
+ // não existe nenhuma linha ainda -> cria a base UMA única vez
+ S=base(); normalizarTemplates();
+ await hashSenhasIniciais();
+ const { error:e2 } = await sb.from('kv').insert({ key:KV_KEY, value:S });
+ if(e2){
+  // provavelmente já existe (corrida entre aparelhos) -> recarrega o que está lá
+  const { data:d2, error:e3 } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
+  if(e3) throw e3;
+  if(d2 && d2.value){ S=d2.value; migrar(); normalizarTemplates(); }
+  else throw e2;
  }
 }
 function marcarSync(estado){
@@ -571,7 +592,7 @@ function base(){
 
 function load(){
  try{const r=store.get(KEY); if(r){S=JSON.parse(r); migrar(); return true}}catch(e){}
- S=base(); normalizarTemplates(); save(); return false;
+ S=base(); normalizarTemplates(); return false;
 }
 /* item de checklist sempre no formato {t,s,tp,e} */
 function normItem(x){
