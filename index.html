@@ -386,6 +386,7 @@ const store={
 const SUPABASE_URL  = 'https://byypptxwwqqmdeicbrns.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5eXBwdHh3d3FxbWRlaWNicm5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NjYxNjcsImV4cCI6MjEwMzQ0MjE2N30.R6zkAghzMUdlHYxF99gjPbru8Ng9vDo-a1J4wg4AKyI';
 const KV_KEY='gq_estado';
+const APP_VERSION='2026-09-16-1';//APPVER
 let sb=null, SB_OK=false;
 try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON,{ auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } }); SB_OK=true; } }catch(e){ console.error(e); }
 
@@ -403,8 +404,15 @@ async function nuvemEnviar(){
  if(!S || !Array.isArray(S.pessoas) || S.pessoas.length===0){ CLOUD.pendente=false; return; }
  CLOUD.salvando=true; CLOUD.pendente=false; marcarSync('salvando');
  try{
+  // 1) RELÊ o estado atual da nuvem e FUNDE dentro do S local. Assim, se outro
+  //    aparelho gravou algo enquanto este estava com uma cópia antiga, nada é apagado.
+  const { data:atual, error:e0 } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
+  if(e0) throw e0;
+  if(atual && atual.value) fundirNaNuvem(atual.value);
+  // 2) grava o resultado já fundido
   const { error } = await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
   if(error) throw error;
+  CLOUD.snap=snapshot();
   marcarSync('ok');
  }catch(e){
   console.error(e); marcarSync('erro');
@@ -431,6 +439,7 @@ async function nuvemCarregar(){
    normalizarTemplates(); await hashSenhasIniciais();
    await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
   }
+  CLOUD.snap=snapshot();
   return;
  }
  // não existe nenhuma linha ainda -> cria a base UMA única vez
@@ -444,12 +453,116 @@ async function nuvemCarregar(){
   if(d2 && d2.value){ S=d2.value; migrar(); normalizarTemplates(); }
   else throw e2;
  }
+ CLOUD.snap=snapshot();
 }
 function marcarSync(estado){
  const el=document.getElementById('syncPill'); if(!el) return;
  if(estado==='ok'){ el.textContent='● salvo na nuvem'; el.style.color='#15803D'; }
  else if(estado==='erro'){ el.textContent='● erro ao salvar'; el.style.color='#B42318'; }
  else { el.textContent='● salvando…'; el.style.color='#92400E'; }
+}
+
+/* ---- FUSÃO: une o estado da nuvem dentro do S local, sem perder registros ----
+   Registros (auditorias, NCs, plano, usuários, notificações) são unidos por
+   identificador. Assim, dois aparelhos usando ao mesmo tempo não apagam o que
+   o outro lançou. Sequências nunca retrocedem (evita códigos repetidos). */
+function unir(local, remoto, chave){
+ if(!Array.isArray(local)||!Array.isArray(remoto)) return;
+ const idx={}; local.forEach((x,i)=>{ idx[chave(x)]=i; });
+ for(const r of remoto){
+  const k=chave(r), i=idx[k];
+  if(i===undefined){ idx[k]=local.push(r)-1; }          // só existe na nuvem: adiciona
+  else if((r._u||0) > (local[i]._u||0)){ local[i]=r; }   // existe nos dois: fica o MAIS RECENTE
+ }
+}
+function fundirNaNuvem(nuvem){
+ if(!nuvem||typeof nuvem!=='object') return;
+ if(!Array.isArray(S.auditorias)) S.auditorias=[];
+ if(!Array.isArray(S.ncs)) S.ncs=[];
+ if(!Array.isArray(S.plano)) S.plano=[];
+ if(!Array.isArray(S.pessoas)) S.pessoas=[];
+ if(!Array.isArray(S.notificacoes)) S.notificacoes=[];
+ unir(S.auditorias,   nuvem.auditorias,   x=>x.id);
+ unir(S.ncs,          nuvem.ncs,          x=>x.id);
+ unir(S.plano,        nuvem.plano,        x=>x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')));
+ unir(S.pessoas,      nuvem.pessoas,      x=>(x.login||'').toLowerCase());
+ unir(S.notificacoes, nuvem.notificacoes, x=>x.id);
+ S.seqA=Math.max(S.seqA||0, nuvem.seqA||0);
+ S.seqN=Math.max(S.seqN||0, nuvem.seqN||0);
+ // configurações/modelos: também vence o mais recente (protege ajuste do admin)
+ if(nuvem.config && (nuvem.config._u||0) > ((S.config&&S.config._u)||0)) S.config=nuvem.config;
+ if(nuvem.templates && (nuvem.templates._u||0) > ((S.templates&&S.templates._u)||0)) S.templates=nuvem.templates;
+ if(nuvem.unidadesInfo && (nuvem.unidadesInfo._u||0) > ((S.unidadesInfo&&S.unidadesInfo._u)||0)) S.unidadesInfo=nuvem.unidadesInfo;
+}
+/* ---- CARIMBO AUTOMÁTICO DE ALTERAÇÕES ----
+   Tira uma "foto" do estado salvo e, a cada gravação, marca com a hora atual
+   qualquer registro cujo conteúdo mudou. Assim a fusão sabe qual é o mais
+   recente — sem precisar carimbar manualmente cada função do app. */
+function stripU(o){ const c={}; for(const k in o){ if(k!=='_u') c[k]=o[k]; } return c; }
+function snapshot(){
+ const m={};
+ (S.auditorias||[]).forEach(a=>{ m['a:'+a.id]=JSON.stringify(stripU(a)); });
+ (S.ncs||[]).forEach(n=>{ m['n:'+n.id]=JSON.stringify(stripU(n)); });
+ (S.pessoas||[]).forEach(p=>{ m['p:'+(p.login||'').toLowerCase()]=JSON.stringify(stripU(p)); });
+ (S.plano||[]).forEach(x=>{ m['l:'+(x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')))]=JSON.stringify(stripU(x)); });
+ if(S.config) m['cfg']=JSON.stringify(stripU(S.config));
+ if(S.templates) m['tpl']=JSON.stringify(stripU(S.templates));
+ if(S.unidadesInfo) m['ui']=JSON.stringify(stripU(S.unidadesInfo));
+ return m;
+}
+function carimbarMudancas(){
+ const snap=CLOUD.snap||{}, now=Date.now();
+ const chk=(arr,pref,keyf)=>{ (arr||[]).forEach(o=>{ const k=pref+keyf(o); if(JSON.stringify(stripU(o))!==snap[k]) o._u=now; }); };
+ chk(S.auditorias,'a:',x=>x.id);
+ chk(S.ncs,'n:',x=>x.id);
+ chk(S.pessoas,'p:',x=>(x.login||'').toLowerCase());
+ chk(S.plano,'l:',x=>x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')));
+ if(S.config && JSON.stringify(stripU(S.config))!==snap['cfg']) S.config._u=now;
+ if(S.templates && JSON.stringify(stripU(S.templates))!==snap['tpl']) S.templates._u=now;
+ if(S.unidadesInfo && JSON.stringify(stripU(S.unidadesInfo))!==snap['ui']) S.unidadesInfo._u=now;
+}
+function assinaturaDados(){
+ const s=a=>(a||[]).map(x=>(x.id||x.login||'')+':'+(x._u||0)).join(',');
+ return s(S.auditorias)+'#'+s(S.ncs)+'#'+s(S.pessoas)+'#'+s(S.plano)+'#'+((S.config&&S.config._u)||0);
+}
+
+/* ---- ATUALIZAÇÃO AUTOMÁTICA ----
+   Verifica no servidor se saiu uma versão nova e recarrega sozinho (buscando
+   o conteúdo novo, sem precisar de CTRL+ALT+R). Só recarrega quando a pessoa
+   não está no meio de um preenchimento, para não atrapalhar. */
+function ocioso(){
+ const mh=document.getElementById('modalHost'); if(mh && mh.innerHTML.trim()) return false;
+ if(VIEW && VIEW.n==='checklist') return false;
+ const ae=document.activeElement;
+ if(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName||'')) return false;
+ if(CLOUD.salvando||CLOUD.pendente) return false;
+ return true;
+}
+async function checarAtualizacao(){
+ try{
+  const r=await fetch(location.pathname+'?_v='+Date.now(),{cache:'no-store'});
+  if(!r.ok) return;
+  const t=await r.text();
+  const m=t.match(/APP_VERSION='([^']+)';\/\/APPVER/);
+  if(m && m[1] && m[1]!==APP_VERSION && ocioso()){
+   location.replace(location.pathname+'?v='+encodeURIComponent(m[1]));
+  }
+ }catch(e){}
+}
+/* Puxa dados novos da nuvem quando a tela está parada, para quem só está
+   olhando (ex.: o admin) ver as auditorias que o cliente acabou de lançar. */
+async function sincronizarSeOcioso(){
+ if(!SB_OK||!SESSION.login||!ocioso()) return;
+ try{
+  const { data } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
+  if(data && data.value){
+   const antes=assinaturaDados();
+   fundirNaNuvem(data.value);
+   CLOUD.snap=snapshot();
+   const dep=assinaturaDados();
+   if(antes!==dep && ocioso()) render();
+  }
+ }catch(e){}
 }
 
 /* ---- senha: hash SHA-256 (mesmo esquema do Almox) ---- */
@@ -662,6 +775,8 @@ function migrar(){
  }
 }
 function save(){
+ // marca (com a hora) os registros que mudaram, para a fusão saber o mais recente
+ try{ carimbarMudancas(); }catch(e){}
  // cópia local de segurança (por navegador) + gravação na nuvem compartilhada
  try{ store.set(KEY,JSON.stringify(S)); }catch(e){}
  nuvemAgendarSave();
@@ -1808,16 +1923,15 @@ function ncFormHTML(a,it,nc){
   <div class="field"><label>Observação</label>
    <input type="text" placeholder="Informação complementar (opcional)" value="${esc(nc.observacao||'')}"
      onchange="campoNC('${it.id}','observacao',this.value)"></div>
-  <div class="field" style="margin-bottom:0"><label>Evidência</label>
-   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  <div class="field" style="margin-bottom:0"><label>Evidências (fotos e arquivos)</label>
+   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
     <label class="filebtn">📷 Tirar foto
-     <input type="file" accept="image/*" capture="environment" style="display:none" onchange="anexarNC('${it.id}',this.files[0])"></label>
+     <input type="file" accept="image/*" capture="environment" multiple style="display:none" onchange="anexarNC('${it.id}',this.files)"></label>
     <label class="filebtn">📎 Anexar arquivo
-     <input type="file" accept="image/*" style="display:none" onchange="anexarNC('${it.id}',this.files[0])"></label>
-    ${nc.evidencia?`<img class="thumb" src="${nc.evidencia}" alt="Evidência">
-      <button class="btn btn-s btn-sm" onclick="campoNC('${it.id}','evidencia',null)">Remover</button>`:
-      `<span style="font-size:12px;color:var(--muted)">Nenhuma evidência anexada</span>`}
-   </div></div>
+     <input type="file" multiple style="display:none" onchange="anexarNC('${it.id}',this.files)"></label>
+   </div>
+   ${galeria(evidsView(nc),`removerEvidNC('${it.id}',`)}
+  </div>
  </div>`;
 }
 function omFormHTML(a,it){
@@ -1854,7 +1968,7 @@ function responder(aid,iid,v){
  if(it.resposta==='NC'&&!it.ncId){
   const pz=new Date(); pz.setDate(pz.getDate()+20);
   const nc={id:uid(),codigo:proxCodN(),auditoriaId:a.id,itemId:it.id,item:it.texto,unidade:a.unidade,setor:a.setor,
-   auditor:a.auditor,descricao:'',observacao:'',evidencia:null,classificacao:'Menor',
+   auditor:a.auditor,descricao:'',observacao:'',evidencias:[],classificacao:'Menor',
    responsavel:gestorDoSetor(a.setor),prazo:pz.toISOString().slice(0,10),status:'Pendente',plano:null,
    abertaEm:Date.now(),rascunho:true,historico:[]};
   S.ncs.push(nc); it.ncId=nc.id;
@@ -1893,8 +2007,64 @@ function campoNC(iid,campo,val){
  if(campo==='evidencia') vChecklist();
 }
 function campoOM(iid,val){ if(modoConsulta()) return; const {it}=itemDe(iid); if(it){ it.om=val; save() } }
-function anexarNC(iid,file){
- lerImagem(file,d=>{ if(d){ campoNC(iid,'evidencia',d); toast('Evidência anexada.','ok') } });
+function anexarNC(iid,files){
+ const {it}=itemDe(iid); if(!it||!it.ncId) return;
+ const nc=S.ncs.find(n=>n.id===it.ncId); if(!nc) return;
+ anexarEvid(nc,files,()=>{ save(); vChecklist(); });
+}
+function removerEvidNC(iid,idx){
+ if(modoConsulta()) return;
+ const {it}=itemDe(iid); if(!it||!it.ncId) return;
+ const nc=S.ncs.find(n=>n.id===it.ncId); if(!nc) return;
+ evidsArr(nc).splice(idx,1); save(); vChecklist();
+}
+/* lista de evidências para mostrar (sem alterar os dados); aceita o formato
+   antigo (uma foto em nc.evidencia) e o novo (nc.evidencias = lista) */
+function evidsView(o){
+ const a=Array.isArray(o.evidencias)?o.evidencias.slice():[];
+ if(o.evidencia) a.unshift({t:'img',d:o.evidencia});
+ return a;
+}
+/* garante a lista nc.evidencias, migrando a foto antiga se houver */
+function evidsArr(o){
+ if(!Array.isArray(o.evidencias)) o.evidencias=[];
+ if(o.evidencia){ o.evidencias.unshift({t:'img',d:o.evidencia}); delete o.evidencia; }
+ return o.evidencias;
+}
+/* anexa uma ou mais fotos/arquivos ao objeto (NC). Fotos são comprimidas;
+   arquivos (Word, PDF, etc.) entram como anexo, com limite de 2 MB cada. */
+function anexarEvid(o,files,done){
+ const arr=Array.from(files||[]); if(!arr.length) return;
+ const evs=evidsArr(o); let pend=arr.length;
+ const fim=()=>{ if(--pend===0){ done&&done() } };
+ arr.forEach(file=>{
+  if(file.type && file.type.startsWith('image/')){
+   lerImagem(file,d=>{ if(d) evs.push({t:'img',d}); fim() });
+  } else {
+   if(file.size>2*1024*1024){ toast('“'+file.name+'” é grande demais (máx. 2 MB).','err'); fim(); return }
+   const fr=new FileReader();
+   fr.onload=()=>{ evs.push({t:'doc',n:file.name,d:fr.result}); fim() };
+   fr.onerror=fim; fr.readAsDataURL(file);
+  }
+ });
+ toast('Anexando evidência…','ok');
+}
+/* galeria de evidências. remBase (ex.: "removerEvidNC('id',") habilita o botão
+   remover em cada item; vazio = somente leitura. */
+function galeria(lista,remBase){
+ if(!lista.length) return `<span style="font-size:12px;color:var(--muted)">Nenhuma evidência anexada</span>`;
+ return `<div style="display:flex;gap:12px;flex-wrap:wrap">`+lista.map((e,i)=>{
+   const rem=remBase?`<button class="btn btn-s btn-sm" style="margin-top:4px" onclick="${remBase}${i})">Remover</button>`:'';
+   const mid = e.t==='doc'
+     ? `<a href="${e.d}" download="${esc(e.n||'arquivo')}" title="${esc(e.n||'arquivo')}" style="display:flex;flex-direction:column;align-items:center;justify-content:center;width:96px;height:96px;border:1px solid var(--line);border-radius:10px;background:var(--canvas);text-decoration:none;color:var(--ink);gap:6px;padding:6px;text-align:center"><span style="font-size:26px">📄</span><span style="font-size:10.5px;line-height:1.15;word-break:break-word">${esc((e.n||'arquivo').slice(0,26))}</span></a>`
+     : `<img class="thumb" src="${e.d}" alt="Evidência">`;
+   return `<div style="display:flex;flex-direction:column;align-items:center">${mid}${rem}</div>`;
+ }).join('')+`</div>`;
+}
+/* bloco de evidências em telas só de leitura (detalhe da NC, relatório) */
+function blocoEvid(o,titulo){
+ const L=evidsView(o); if(!L.length) return '';
+ return `<div style="margin-top:14px"><div class="eyebrow" style="margin-bottom:7px">${titulo}</div>${galeria(L,'')}</div>`;
 }
 function removerItem(aid,iid){
  if(bloqueado()) return;
@@ -2143,8 +2313,7 @@ function vNC(){
      <div style="font-size:12.5px;color:var(--muted);margin-top:8px">Item auditado: ${esc(n.item)}</div>
      ${n.observacao?`<div style="margin-top:12px;background:var(--canvas);border-radius:10px;padding:11px 13px;font-size:13px">
       <span class="eyebrow">Observação</span><div style="margin-top:3px">${esc(n.observacao)}</div></div>`:''}
-     ${n.evidencia?`<div style="margin-top:14px"><div class="eyebrow" style="margin-bottom:7px">Evidência do apontamento</div>
-      <img class="evid" src="${n.evidencia}" alt="Evidência da não conformidade"></div>`:''}
+     ${blocoEvid(n,'Evidências do apontamento')}
     </div>
    </div>
 
@@ -2793,12 +2962,13 @@ function vConfig(){
  </div>
 
  <div class="card" style="margin-top:16px">
-  <div class="hd"><h3>Dados</h3><span class="note">os dados ficam salvos neste navegador</span></div>
+  <div class="hd"><h3>Dados</h3><span class="note">os dados ficam salvos na nuvem (base compartilhada)</span></div>
   <div class="bd" style="display:flex;gap:9px;flex-wrap:wrap">
    <button class="btn btn-s" onclick="exportar()">Exportar backup (.json)</button>
    <label class="btn btn-s">Importar backup<input type="file" accept="application/json" style="display:none" onchange="importar(this.files[0])"></label>
    <button class="btn btn-s" onclick="exportarCSV()">Exportar não conformidades (.csv)</button>
    <div class="spacer"></div>
+   <button class="btn btn-w" onclick="zerarOperacional()">Limpar auditorias, NCs e plano (mantém usuários)</button>
    <button class="btn btn-no" onclick="zerar()">Apagar tudo e recomeçar</button>
   </div>
  </div>`;
@@ -2983,9 +3153,17 @@ function exportarCSV(){
  baixar(`nao-conformidades-${hoje()}.csv`,csv,'text/csv'); toast('CSV gerado.','ok');
 }
 function zerar(){
- confirmar('Apagar todos os dados?','As auditorias, as não conformidades e as configurações serão removidas deste navegador. Exporte o backup antes, se quiser guardar o histórico.',()=>{
+ confirmar('Apagar todos os dados?','As auditorias, as não conformidades, os usuários e as configurações serão removidos. Exporte o backup antes, se quiser guardar o histórico.',()=>{
   store.del(KEY); S=base(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
  },'Apagar tudo','btn-no');
+}
+function zerarOperacional(){
+ confirmar('Limpar auditorias, NCs e plano?',
+  'Remove todas as auditorias realizadas, as não conformidades e o plano de auditorias. Mantém os usuários, os setores, as unidades e as configurações. Não dá para desfazer — se quiser, exporte o backup antes.',
+  ()=>{
+   S.auditorias=[]; S.ncs=[]; S.plano=[]; S.notificacoes=[]; S.seqA=0; S.seqN=0;
+   save(); fecharModal(); go('dashboard'); toast('Auditorias, não conformidades e plano foram apagados.','ok');
+  },'Limpar agora','btn-w');
 }
 
 /* ---------------- ÁREA DO GESTOR ---------------- */
@@ -3259,8 +3437,7 @@ function vRelatorio(){
     <div style="font-weight:600;line-height:1.5">${esc(n.descricao)}</div>
     <div style="font-size:12.3px;color:var(--muted);margin-top:5px">Requisito: ${esc(n.item)} · Responsável: ${esc(n.responsavel)}</div>
     ${n.observacao?`<div style="font-size:12.5px;margin-top:8px"><b>Observação:</b> ${esc(n.observacao)}</div>`:''}
-    ${n.evidencia?`<div style="margin-top:12px"><div class="eyebrow" style="margin-bottom:6px">Evidência do apontamento</div>
-      <img class="evid" style="max-height:200px" src="${n.evidencia}" alt="Evidência"></div>`:''}
+    ${blocoEvid(n,'Evidências do apontamento')}
     ${n.plano?`<div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)">
       <div class="eyebrow" style="margin-bottom:7px">Plano de ação</div>
       <div style="font-size:13px;margin-bottom:6px"><b>Causa:</b> ${esc(n.plano.causa||'—')}</div>
@@ -3373,6 +3550,12 @@ document.querySelector('.app').style.display='none';
   telaLogin();
  }
 })();
+
+/* atualização automática (sem CTRL+ALT+R) e sincronização de quem está olhando */
+setInterval(checarAtualizacao, 60000);
+setInterval(sincronizarSeOcioso, 40000);
+window.addEventListener('focus', ()=>{ checarAtualizacao(); sincronizarSeOcioso(); });
+setTimeout(checarAtualizacao, 3000);
 </script>
 </body>
 </html>
