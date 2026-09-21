@@ -386,11 +386,74 @@ const store={
 const SUPABASE_URL  = 'https://byypptxwwqqmdeicbrns.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5eXBwdHh3d3FxbWRlaWNicm5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NjYxNjcsImV4cCI6MjEwMzQ0MjE2N30.R6zkAghzMUdlHYxF99gjPbru8Ng9vDo-a1J4wg4AKyI';
 const KV_KEY='gq_estado';
-const APP_VERSION='2026-09-16-1';//APPVER
+const APP_VERSION='2026-09-21-1';//APPVER
 let sb=null, SB_OK=false;
 try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON,{ auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } }); SB_OK=true; } }catch(e){ console.error(e); }
 
-const CLOUD={ salvando:false, pendente:false, timer:null };
+const CLOUD={ salvando:false, pendente:false, timer:null, snap:null };
+
+/* ===========================================================================
+   ARMAZENAMENTO POR REGISTRO (à prova de perda entre vários aparelhos).
+   Em vez de gravar TODO o estado num pacote único, cada auditoria, NC,
+   usuário, item de plano e notificação vira uma LINHA própria na tabela kv.
+   Ao salvar, grava só as linhas que mudaram (e apaga as removidas). Assim,
+   salvar uma auditoria mexe só nela — nenhum aparelho sobrescreve o que o
+   outro gravou, e não depende do relógio de ninguém. ===================== */
+function keyAud(a){ return 'aud:'+a.id; }
+function keyNc(n){ return 'nc:'+n.id; }
+function keyUser(p){ return 'user:'+(p.login||'').toLowerCase(); }
+function keyPlano(x){ if(!x.id) x.id=uid(); return 'pl:'+x.id; }
+function keyNotif(n){ if(!n.id) n.id=uid(); return 'notif:'+n.id; }
+function ehLinhaRegistro(k){ return k==='gq_config'||k==='gq_templates'||k==='gq_unidadesInfo'||k==='gq_seq'||/^(aud|nc|pl|user|notif):/.test(k); }
+
+function montarEstado(rows){
+ const S0=base();
+ S0.auditorias=[]; S0.ncs=[]; S0.plano=[]; S0.notificacoes=[]; S0.pessoas=[];
+ let temUser=false;
+ for(const r of (rows||[])){
+  const k=r.key, v=r.value; if(v==null) continue;
+  if(k==='gq_config') S0.config=v;
+  else if(k==='gq_templates') S0.templates=v;
+  else if(k==='gq_unidadesInfo') S0.unidadesInfo=v;
+  else if(k==='gq_seq'){ S0.seqA=v.seqA||0; S0.seqN=v.seqN||0; }
+  else if(k.indexOf('aud:')===0) S0.auditorias.push(v);
+  else if(k.indexOf('nc:')===0) S0.ncs.push(v);
+  else if(k.indexOf('pl:')===0) S0.plano.push(v);
+  else if(k.indexOf('user:')===0){ S0.pessoas.push(v); temUser=true; }
+  else if(k.indexOf('notif:')===0) S0.notificacoes.push(v);
+ }
+ if(!temUser || !S0.pessoas.length){ const b=base(); if(!S0.pessoas.length) S0.pessoas=b.pessoas; }
+ if(!S0.templates) S0.templates=JSON.parse(JSON.stringify(TEMPLATES));
+ S0.auditorias.sort((a,b)=>String(b.data||'').localeCompare(String(a.data||''))||((b.criadoEm||0)-(a.criadoEm||0)));
+ S0.ncs.sort((a,b)=>(b.abertaEm||0)-(a.abertaEm||0));
+ return S0;
+}
+function snapshotRows(){
+ const m={};
+ (S.auditorias||[]).forEach(a=>{ m[keyAud(a)]=JSON.stringify(a); });
+ (S.ncs||[]).forEach(n=>{ m[keyNc(n)]=JSON.stringify(n); });
+ (S.plano||[]).forEach(x=>{ m[keyPlano(x)]=JSON.stringify(x); });
+ (S.pessoas||[]).forEach(p=>{ m[keyUser(p)]=JSON.stringify(p); });
+ (S.notificacoes||[]).forEach(n=>{ m[keyNotif(n)]=JSON.stringify(n); });
+ m['gq_config']=JSON.stringify(S.config||{});
+ m['gq_templates']=JSON.stringify(S.templates||{});
+ m['gq_unidadesInfo']=JSON.stringify(S.unidadesInfo||{});
+ m['gq_seq']=JSON.stringify({seqA:S.seqA||0,seqN:S.seqN||0});
+ return m;
+}
+async function gravarTudo(){
+ const m=snapshotRows(), ups=[];
+ for(const k in m) ups.push({ key:k, value:JSON.parse(m[k]) });
+ for(let i=0;i<ups.length;i+=100){
+  const { error } = await sb.from('kv').upsert(ups.slice(i,i+100),{ onConflict:'key' });
+  if(error) throw error;
+ }
+}
+async function garantirAdmin(){
+ if(Array.isArray(S.pessoas) && S.pessoas.length) return;
+ const b=base(); S.pessoas=b.pessoas; await hashSenhasIniciais();
+ await sb.from('kv').upsert({ key:keyUser(S.pessoas[0]), value:S.pessoas[0] },{ onConflict:'key' });
+}
 
 function nuvemAgendarSave(){
  if(!SB_OK) return;
@@ -400,19 +463,18 @@ function nuvemAgendarSave(){
 }
 async function nuvemEnviar(){
  if(!SB_OK||CLOUD.salvando){ return; }
- // segurança: nunca grava uma base sem nenhum usuário (sempre há ao menos o admin)
  if(!S || !Array.isArray(S.pessoas) || S.pessoas.length===0){ CLOUD.pendente=false; return; }
  CLOUD.salvando=true; CLOUD.pendente=false; marcarSync('salvando');
  try{
-  // 1) RELÊ o estado atual da nuvem e FUNDE dentro do S local. Assim, se outro
-  //    aparelho gravou algo enquanto este estava com uma cópia antiga, nada é apagado.
-  const { data:atual, error:e0 } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
-  if(e0) throw e0;
-  if(atual && atual.value) fundirNaNuvem(atual.value);
-  // 2) grava o resultado já fundido
-  const { error } = await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
-  if(error) throw error;
-  CLOUD.snap=snapshot();
+  const agora=snapshotRows(), snap=CLOUD.snap||{};
+  const ups=[]; for(const k in agora){ if(agora[k]!==snap[k]) ups.push({ key:k, value:JSON.parse(agora[k]) }); }
+  const dels=[]; for(const k in snap){ if(!(k in agora)) dels.push(k); }
+  for(let i=0;i<ups.length;i+=100){
+   const { error } = await sb.from('kv').upsert(ups.slice(i,i+100),{ onConflict:'key' });
+   if(error) throw error;
+  }
+  if(dels.length){ const { error } = await sb.from('kv').delete().in('key',dels); if(error) throw error; }
+  CLOUD.snap=agora;
   marcarSync('ok');
  }catch(e){
   console.error(e); marcarSync('erro');
@@ -422,39 +484,40 @@ async function nuvemEnviar(){
   if(CLOUD.pendente) nuvemAgendarSave();
  }
 }
-/* lê o estado compartilhado.
-   REGRA DE OURO: se já existe base salva na nuvem, SEMPRE usa e NUNCA
-   sobrescreve. A base inicial só é criada quando de fato não existe
-   nenhuma linha — e é criada com INSERT (não upsert), então, se por
-   acaso já existir, o INSERT falha e a gente recarrega o que está lá.
-   Isso torna impossível apagar dados existentes por uma leitura falha. */
+async function lerTodasLinhas(){
+ const todas=[]; let de=0; const passo=1000;
+ for(;;){
+  const { data, error } = await sb.from('kv').select('key,value').range(de, de+passo-1);
+  if(error) throw error;
+  const bloco=data||[]; for(const r of bloco) todas.push(r);
+  if(bloco.length<passo) break;
+  de+=passo;
+ }
+ return todas;
+}
 async function nuvemCarregar(){
- const { data, error } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
- if(error) throw error;
- if(data && data.value){
-  S=data.value; migrar(); normalizarTemplates();
-  if(!Array.isArray(S.pessoas) || S.pessoas.length===0){
-   // proteção: garante um administrador sem apagar o resto dos dados
-   const b=base(); S.pessoas=(b.pessoas||[]); if(!S.templates) S.templates=b.templates;
-   normalizarTemplates(); await hashSenhasIniciais();
-   await sb.from('kv').upsert({ key:KV_KEY, value:S }, { onConflict:'key' });
-  }
-  CLOUD.snap=snapshot();
+ const lista=await lerTodasLinhas();
+ if(lista.some(r=>ehLinhaRegistro(r.key))){
+  S=montarEstado(lista); migrar(); normalizarTemplates();
+  await garantirAdmin();
+  CLOUD.snap=snapshotRows();
   return;
  }
- // não existe nenhuma linha ainda -> cria a base UMA única vez
- S=base(); normalizarTemplates();
- await hashSenhasIniciais();
- const { error:e2 } = await sb.from('kv').insert({ key:KV_KEY, value:S });
- if(e2){
-  // provavelmente já existe (corrida entre aparelhos) -> recarrega o que está lá
-  const { data:d2, error:e3 } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
-  if(e3) throw e3;
-  if(d2 && d2.value){ S=d2.value; migrar(); normalizarTemplates(); }
-  else throw e2;
+ const antigo=lista.find(r=>r.key===KV_KEY);
+ if(antigo && antigo.value){
+  // MIGRAÇÃO automática: pacote único antigo -> linhas por registro (uma vez)
+  S=antigo.value; migrar(); normalizarTemplates();
+  if(!Array.isArray(S.pessoas) || !S.pessoas.length){ const b=base(); S.pessoas=b.pessoas; }
+  await hashSenhasIniciais();
+  await gravarTudo();
+  CLOUD.snap=snapshotRows();
+  return;
  }
- CLOUD.snap=snapshot();
+ S=base(); normalizarTemplates(); await hashSenhasIniciais();
+ await gravarTudo();
+ CLOUD.snap=snapshotRows();
 }
+
 function marcarSync(estado){
  const el=document.getElementById('syncPill'); if(!el) return;
  if(estado==='ok'){ el.textContent='● salvo na nuvem'; el.style.color='#15803D'; }
@@ -462,68 +525,10 @@ function marcarSync(estado){
  else { el.textContent='● salvando…'; el.style.color='#92400E'; }
 }
 
-/* ---- FUSÃO: une o estado da nuvem dentro do S local, sem perder registros ----
-   Registros (auditorias, NCs, plano, usuários, notificações) são unidos por
-   identificador. Assim, dois aparelhos usando ao mesmo tempo não apagam o que
-   o outro lançou. Sequências nunca retrocedem (evita códigos repetidos). */
-function unir(local, remoto, chave){
- if(!Array.isArray(local)||!Array.isArray(remoto)) return;
- const idx={}; local.forEach((x,i)=>{ idx[chave(x)]=i; });
- for(const r of remoto){
-  const k=chave(r), i=idx[k];
-  if(i===undefined){ idx[k]=local.push(r)-1; }          // só existe na nuvem: adiciona
-  else if((r._u||0) > (local[i]._u||0)){ local[i]=r; }   // existe nos dois: fica o MAIS RECENTE
- }
-}
-function fundirNaNuvem(nuvem){
- if(!nuvem||typeof nuvem!=='object') return;
- if(!Array.isArray(S.auditorias)) S.auditorias=[];
- if(!Array.isArray(S.ncs)) S.ncs=[];
- if(!Array.isArray(S.plano)) S.plano=[];
- if(!Array.isArray(S.pessoas)) S.pessoas=[];
- if(!Array.isArray(S.notificacoes)) S.notificacoes=[];
- unir(S.auditorias,   nuvem.auditorias,   x=>x.id);
- unir(S.ncs,          nuvem.ncs,          x=>x.id);
- unir(S.plano,        nuvem.plano,        x=>x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')));
- unir(S.pessoas,      nuvem.pessoas,      x=>(x.login||'').toLowerCase());
- unir(S.notificacoes, nuvem.notificacoes, x=>x.id);
- S.seqA=Math.max(S.seqA||0, nuvem.seqA||0);
- S.seqN=Math.max(S.seqN||0, nuvem.seqN||0);
- // configurações/modelos: também vence o mais recente (protege ajuste do admin)
- if(nuvem.config && (nuvem.config._u||0) > ((S.config&&S.config._u)||0)) S.config=nuvem.config;
- if(nuvem.templates && (nuvem.templates._u||0) > ((S.templates&&S.templates._u)||0)) S.templates=nuvem.templates;
- if(nuvem.unidadesInfo && (nuvem.unidadesInfo._u||0) > ((S.unidadesInfo&&S.unidadesInfo._u)||0)) S.unidadesInfo=nuvem.unidadesInfo;
-}
-/* ---- CARIMBO AUTOMÁTICO DE ALTERAÇÕES ----
-   Tira uma "foto" do estado salvo e, a cada gravação, marca com a hora atual
-   qualquer registro cujo conteúdo mudou. Assim a fusão sabe qual é o mais
-   recente — sem precisar carimbar manualmente cada função do app. */
-function stripU(o){ const c={}; for(const k in o){ if(k!=='_u') c[k]=o[k]; } return c; }
-function snapshot(){
- const m={};
- (S.auditorias||[]).forEach(a=>{ m['a:'+a.id]=JSON.stringify(stripU(a)); });
- (S.ncs||[]).forEach(n=>{ m['n:'+n.id]=JSON.stringify(stripU(n)); });
- (S.pessoas||[]).forEach(p=>{ m['p:'+(p.login||'').toLowerCase()]=JSON.stringify(stripU(p)); });
- (S.plano||[]).forEach(x=>{ m['l:'+(x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')))]=JSON.stringify(stripU(x)); });
- if(S.config) m['cfg']=JSON.stringify(stripU(S.config));
- if(S.templates) m['tpl']=JSON.stringify(stripU(S.templates));
- if(S.unidadesInfo) m['ui']=JSON.stringify(stripU(S.unidadesInfo));
- return m;
-}
-function carimbarMudancas(){
- const snap=CLOUD.snap||{}, now=Date.now();
- const chk=(arr,pref,keyf)=>{ (arr||[]).forEach(o=>{ const k=pref+keyf(o); if(JSON.stringify(stripU(o))!==snap[k]) o._u=now; }); };
- chk(S.auditorias,'a:',x=>x.id);
- chk(S.ncs,'n:',x=>x.id);
- chk(S.pessoas,'p:',x=>(x.login||'').toLowerCase());
- chk(S.plano,'l:',x=>x.id||(x.ym+'|'+x.setor+'|'+x.unidade+'|'+(x.auditor||'')));
- if(S.config && JSON.stringify(stripU(S.config))!==snap['cfg']) S.config._u=now;
- if(S.templates && JSON.stringify(stripU(S.templates))!==snap['tpl']) S.templates._u=now;
- if(S.unidadesInfo && JSON.stringify(stripU(S.unidadesInfo))!==snap['ui']) S.unidadesInfo._u=now;
-}
+/* assinatura leve do estado (para saber se algo mudou e vale re-desenhar) */
 function assinaturaDados(){
- const s=a=>(a||[]).map(x=>(x.id||x.login||'')+':'+(x._u||0)).join(',');
- return s(S.auditorias)+'#'+s(S.ncs)+'#'+s(S.pessoas)+'#'+s(S.plano)+'#'+((S.config&&S.config._u)||0);
+ const m=snapshotRows();
+ return Object.keys(m).sort().map(k=>k+':'+m[k].length).join('|');
 }
 
 /* ---- ATUALIZAÇÃO AUTOMÁTICA ----
@@ -554,14 +559,13 @@ async function checarAtualizacao(){
 async function sincronizarSeOcioso(){
  if(!SB_OK||!SESSION.login||!ocioso()) return;
  try{
-  const { data } = await sb.from('kv').select('value').eq('key',KV_KEY).maybeSingle();
-  if(data && data.value){
-   const antes=assinaturaDados();
-   fundirNaNuvem(data.value);
-   CLOUD.snap=snapshot();
-   const dep=assinaturaDados();
-   if(antes!==dep && ocioso()) render();
-  }
+  const rows=await lerTodasLinhas();
+  if(!rows||!rows.some(r=>ehLinhaRegistro(r.key))) return;
+  const antes=assinaturaDados();
+  const novo=montarEstado(rows);
+  if(!ocioso()) return;
+  S=novo; migrar(); normalizarTemplates(); CLOUD.snap=snapshotRows();
+  if(antes!==assinaturaDados()) render();
  }catch(e){}
 }
 
@@ -775,9 +779,7 @@ function migrar(){
  }
 }
 function save(){
- // marca (com a hora) os registros que mudaram, para a fusão saber o mais recente
- try{ carimbarMudancas(); }catch(e){}
- // cópia local de segurança (por navegador) + gravação na nuvem compartilhada
+ // cópia local de segurança (por navegador) + gravação por registro na nuvem
  try{ store.set(KEY,JSON.stringify(S)); }catch(e){}
  nuvemAgendarSave();
 }
