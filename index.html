@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="theme-color" content="#0B1220">
 <title>Gestão da Qualidade</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -338,6 +341,7 @@ tbody tr.click:hover{background:#FAFBFF}
       </div>
       <div class="spacer"></div>
       <span id="syncPill" class="noprint" style="font-size:11px;font-weight:600;color:#15803D;margin-right:4px" title="Situação da gravação na nuvem">● salvo na nuvem</span>
+      <span class="noprint" onclick="diagnosticoNuvem()" title="Toque para diagnóstico da nuvem" style="font-size:10px;color:#94A3B8;margin-right:8px;cursor:pointer">diagnóstico</span>
       <div class="who noprint" id="verComo"></div>
       <div class="who noprint" id="whoBox"></div>
       <button class="bell noprint" onclick="toggleNotif()" title="Notificações">🔔<span id="bellCount"></span></button>
@@ -386,11 +390,12 @@ const store={
 const SUPABASE_URL  = 'https://byypptxwwqqmdeicbrns.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5eXBwdHh3d3FxbWRlaWNicm5zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4NjYxNjcsImV4cCI6MjEwMzQ0MjE2N30.R6zkAghzMUdlHYxF99gjPbru8Ng9vDo-a1J4wg4AKyI';
 const KV_KEY='gq_estado';
-const APP_VERSION='2026-09-21-1';//APPVER
+const APP_VERSION='2026-10-05-1';//APPVER
 let sb=null, SB_OK=false;
 try{ if(window.supabase&&window.supabase.createClient){ sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON,{ auth:{ persistSession:false, autoRefreshToken:false, detectSessionInUrl:false } }); SB_OK=true; } }catch(e){ console.error(e); }
 
 const CLOUD={ salvando:false, pendente:false, timer:null, snap:null };
+let EXCLUSAO_OK=false; // só true durante uma limpeza explícita pelo usuário
 
 /* ===========================================================================
    ARMAZENAMENTO POR REGISTRO (à prova de perda entre vários aparelhos).
@@ -465,6 +470,7 @@ async function nuvemEnviar(){
  if(!SB_OK||CLOUD.salvando){ return; }
  if(!S || !Array.isArray(S.pessoas) || S.pessoas.length===0){ CLOUD.pendente=false; return; }
  CLOUD.salvando=true; CLOUD.pendente=false; marcarSync('salvando');
+ let falhou=false;
  try{
   const agora=snapshotRows(), snap=CLOUD.snap||{};
   const ups=[]; for(const k in agora){ if(agora[k]!==snap[k]) ups.push({ key:k, value:JSON.parse(agora[k]) }); }
@@ -473,15 +479,31 @@ async function nuvemEnviar(){
    const { error } = await sb.from('kv').upsert(ups.slice(i,i+100),{ onConflict:'key' });
    if(error) throw error;
   }
-  if(dels.length){ const { error } = await sb.from('kv').delete().in('key',dels); if(error) throw error; }
+  if(dels.length){
+   const regs = dels.filter(k=>/^(aud|nc|pl|notif):/.test(k));
+   if(regs.length>3 && !EXCLUSAO_OK){
+    // SEGURANÇA: nunca apagamos muitos registros de uma vez sem uma ação
+    // explícita de limpeza. Protege contra qualquer falha que encolha o
+    // estado local — os registros ficam na nuvem e voltam no próximo load.
+    console.warn('[seguranca] exclusao em massa de '+regs.length+' registros bloqueada');
+    const permitido = dels.filter(k=>!/^(aud|nc|pl|notif):/.test(k));
+    if(permitido.length){ const { error } = await sb.from('kv').delete().in('key',permitido); if(error) throw error; }
+   } else {
+    const { error } = await sb.from('kv').delete().in('key',dels); if(error) throw error;
+   }
+  }
   CLOUD.snap=agora;
-  marcarSync('ok');
+  CLOUD.retry=0; EXCLUSAO_OK=false; marcarSync('ok');
  }catch(e){
-  console.error(e); marcarSync('erro');
-  toast('Não consegui salvar na nuvem: '+(e.message||e),'err');
+  falhou=true; console.error(e); marcarSync('erro');
  }finally{
   CLOUD.salvando=false;
-  if(CLOUD.pendente) nuvemAgendarSave();
+  if(falhou){
+   // não perde o lançamento: mantém pendente e tenta de novo sozinho
+   CLOUD.pendente=true; CLOUD.retry=(CLOUD.retry||0)+1;
+   const espera=Math.min(5000*CLOUD.retry, 30000);
+   clearTimeout(CLOUD.timer); CLOUD.timer=setTimeout(nuvemEnviar, espera);
+  } else if(CLOUD.pendente){ nuvemAgendarSave(); }
  }
 }
 async function lerTodasLinhas(){
@@ -520,9 +542,9 @@ async function nuvemCarregar(){
 
 function marcarSync(estado){
  const el=document.getElementById('syncPill'); if(!el) return;
- if(estado==='ok'){ el.textContent='● salvo na nuvem'; el.style.color='#15803D'; }
- else if(estado==='erro'){ el.textContent='● erro ao salvar'; el.style.color='#B42318'; }
- else { el.textContent='● salvando…'; el.style.color='#92400E'; }
+ if(estado==='ok'){ el.textContent='● salvo na nuvem'; el.style.color='#15803D'; el.title='Situação da gravação na nuvem'; }
+ else if(estado==='erro'){ el.textContent='● sem conexão, tentando de novo…'; el.style.color='#B45309'; el.title='Seu lançamento está guardado e será salvo assim que a conexão voltar. Mantenha o app aberto.'; }
+ else { el.textContent='● salvando…'; el.style.color='#92400E'; el.title='Situação da gravação na nuvem'; }
 }
 
 /* assinatura leve do estado (para saber se algo mudou e vale re-desenhar) */
@@ -543,16 +565,21 @@ function ocioso(){
  if(CLOUD.salvando||CLOUD.pendente) return false;
  return true;
 }
+let NOVA_VERSAO=null;
 async function checarAtualizacao(){
  try{
   const r=await fetch(location.pathname+'?_v='+Date.now(),{cache:'no-store'});
   if(!r.ok) return;
   const t=await r.text();
   const m=t.match(/APP_VERSION='([^']+)';\/\/APPVER/);
-  if(m && m[1] && m[1]!==APP_VERSION && ocioso()){
-   location.replace(location.pathname+'?v='+encodeURIComponent(m[1]));
-  }
+  if(m && m[1] && m[1]!==APP_VERSION){ NOVA_VERSAO=m[1]; aplicarAtualizacao(); }
  }catch(e){}
+}
+function aplicarAtualizacao(){
+ if(!NOVA_VERSAO || !ocioso()) return;
+ try{ toast('Atualizando para a versão mais recente…','ok'); }catch(e){}
+ const alvo=location.pathname+'?v='+encodeURIComponent(NOVA_VERSAO)+'&t='+Date.now();
+ setTimeout(()=>{ try{ location.replace(alvo); }catch(e){ location.reload(); } }, 500);
 }
 /* Puxa dados novos da nuvem quando a tela está parada, para quem só está
    olhando (ex.: o admin) ver as auditorias que o cliente acabou de lançar. */
@@ -770,12 +797,11 @@ function migrar(){
   c.rev=4;
  }
  // rev 5: remover a base de demonstração e começar vazio, preservando o acesso admin
- if((c.rev||1)<5){
-  const adm=S.pessoas.find(p=>p.login==='admin')
-    ||S.pessoas.find(p=>p.papel==='Administrador');
-  S=base();
-  if(adm){ S.pessoas=[adm]; }
-  S.config.rev=5;
+if((c.rev||1)<5){
+  // Versões antigas apagavam a base de demonstração aqui (S=base()).
+  // Isso já ocorreu há muito tempo e agora seria perigoso: jamais
+  // descartamos auditorias/NCs reais. Apenas marcamos a revisão.
+  S.config=S.config||{}; S.config.rev=5;
  }
 }
 function save(){
@@ -1186,11 +1212,57 @@ function telaLogin(msg){
    </div>
    ${SB_OK?'':`<div class="loginerr" style="margin:0 28px 0">⚠ Não consegui carregar a conexão com o servidor. Verifique a internet e recarregue a página.</div>`}
    <div class="demoacc">Esqueceu a senha? Procure o gestor da qualidade.</div>
+   <div style="text-align:center;padding:4px 0 2px;font-size:11px;color:#94A3B8">versão ${esc(APP_VERSION)} · <a href="#" onclick="diagnosticoNuvem();return false" style="color:#64748B;text-decoration:underline">Diagnóstico da nuvem</a></div>
   </div>`;
  document.body.appendChild(host);
  setTimeout(()=>{const e=$('#lgUser'); if(e) e.focus()},80);
 }
 function preencher(u,s2){ $('#lgUser').value=u; $('#lgPass').value=s2; $('#lgPass').focus() }
+/* ---- DIAGNÓSTICO DA NUVEM ----
+   Testa, ao vivo e contra o banco real, se GRAVAR e LER estão funcionando,
+   e mostra um panorama do que existe lá. Serve pra achar a causa sem chute. */
+async function diagnosticoNuvem(){
+ const L=[]; const add=(k,v)=>L.push(k+': '+v);
+ add('Versão do app rodando', APP_VERSION);
+ add('Conexão iniciou', SB_OK?'sim':'NÃO');
+ if(!SB_OK){ mostrarDiag(L); return; }
+ const tk='diag:'+Date.now(); const tv={ ok:true, quando:new Date().toISOString() };
+ let escreveu=false, leu=false, erroW='', erroR='';
+ try{ const {error}=await sb.from('kv').upsert({key:tk,value:tv},{onConflict:'key'}); if(error) erroW=(error.message||JSON.stringify(error)); else escreveu=true; }catch(e){ erroW=((e&&e.message)||e); }
+ try{ const {data,error}=await sb.from('kv').select('value').eq('key',tk).maybeSingle(); if(error) erroR=(error.message||JSON.stringify(error)); else leu=!!(data&&data.value&&data.value.ok); }catch(e){ erroR=((e&&e.message)||e); }
+ add('Gravou no banco', escreveu?'SIM':('NÃO — '+erroW));
+ add('Leu de volta o que gravou', leu?'SIM':('NÃO — '+erroR));
+ try{
+  const rows=await lerTodasLinhas();
+  let aud=0,nc=0,pl=0,user=0,notif=0,blob=false,cfg=false;
+  rows.forEach(r=>{ const k=r.key;
+   if(k==='gq_estado')blob=true; else if(k==='gq_config')cfg=true;
+   else if(k.indexOf('aud:')===0)aud++; else if(k.indexOf('nc:')===0)nc++; else if(k.indexOf('pl:')===0)pl++;
+   else if(k.indexOf('user:')===0)user++; else if(k.indexOf('notif:')===0)notif++; });
+  add('Total de linhas no banco', rows.length);
+  add('Auditorias salvas (aud:)', aud);
+  add('Não conformidades salvas (nc:)', nc);
+  add('Usuários (user:)', user);
+  add('Planos/Notificações', pl+' / '+notif);
+  add('Formato novo (gq_config)', cfg?'sim':'NÃO');
+  add('Pacote antigo (gq_estado)', blob?'ainda existe (backup)':'não existe');
+ }catch(e){ add('Leitura do banco', 'ERRO — '+((e&&e.message)||e)); }
+ try{ add('Na tela agora — auditorias', (S.auditorias||[]).length); add('Na tela agora — NCs', (S.ncs||[]).length); }catch(e){}
+ try{ await sb.from('kv').delete().eq('key',tk); }catch(e){}
+ mostrarDiag(L);
+}
+function mostrarDiag(linhas){
+ let o=document.getElementById('diagBox'); if(o) o.remove();
+ o=document.createElement('div'); o.id='diagBox';
+ o.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+ o.innerHTML='<div style="background:#fff;max-width:560px;width:100%;max-height:85vh;overflow:auto;border-radius:14px;padding:20px 20px 16px;font-family:system-ui,-apple-system,sans-serif">'
+  +'<h3 style="margin:0 0 10px;font-size:18px">Diagnóstico da nuvem</h3>'
+  +'<pre style="white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.55;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:12px;margin:0 0 12px">'+esc(linhas.join('\n'))+'</pre>'
+  +'<div style="font-size:12px;color:#64748B;margin:0 0 12px">Tire um print desta tela e me envie.</div>'
+  +'<button onclick="document.getElementById(\'diagBox\').remove()" style="width:100%;padding:11px;border:0;border-radius:8px;background:#0F172A;color:#fff;font-weight:600;cursor:pointer">Fechar</button>'
+  +'</div>';
+ document.body.appendChild(o);
+}
 
 /* Login por usuário e senha (modelo Almox). Os usuários estão em S.pessoas,
    que já veio do banco compartilhado no boot. Senha conferida por hash. */
@@ -3156,7 +3228,7 @@ function exportarCSV(){
 }
 function zerar(){
  confirmar('Apagar todos os dados?','As auditorias, as não conformidades, os usuários e as configurações serão removidos. Exporte o backup antes, se quiser guardar o histórico.',()=>{
-  store.del(KEY); S=base(); save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
+  store.del(KEY); S=base(); EXCLUSAO_OK=true; save(); fecharModal(); go('dashboard'); toast('Dados reiniciados.','ok');
  },'Apagar tudo','btn-no');
 }
 function zerarOperacional(){
@@ -3164,7 +3236,7 @@ function zerarOperacional(){
   'Remove todas as auditorias realizadas, as não conformidades e o plano de auditorias. Mantém os usuários, os setores, as unidades e as configurações. Não dá para desfazer — se quiser, exporte o backup antes.',
   ()=>{
    S.auditorias=[]; S.ncs=[]; S.plano=[]; S.notificacoes=[]; S.seqA=0; S.seqN=0;
-   save(); fecharModal(); go('dashboard'); toast('Auditorias, não conformidades e plano foram apagados.','ok');
+   EXCLUSAO_OK=true; save(); fecharModal(); go('dashboard'); toast('Auditorias, não conformidades e plano foram apagados.','ok');
   },'Limpar agora','btn-w');
 }
 
@@ -3556,8 +3628,10 @@ document.querySelector('.app').style.display='none';
 /* atualização automática (sem CTRL+ALT+R) e sincronização de quem está olhando */
 setInterval(checarAtualizacao, 60000);
 setInterval(sincronizarSeOcioso, 40000);
+setInterval(aplicarAtualizacao, 5000); // havendo atualização pendente, aplica assim que ficar ocioso
 window.addEventListener('focus', ()=>{ checarAtualizacao(); sincronizarSeOcioso(); });
-setTimeout(checarAtualizacao, 3000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ checarAtualizacao(); sincronizarSeOcioso(); } });
+setTimeout(checarAtualizacao, 2000);
 </script>
 </body>
 </html>
